@@ -1,0 +1,4 @@
+list : https://www.geeksforgeeks.org/python/python-list-exercise/
+tuple : https://www.geeksforgeeks.org/python/python-tuple-exercise/
+dictionary : https://www.geeksforgeeks.org/python/python-dictionary-exercise/
+string :https://www.geeksforgeeks.org/python/python-string-exercise/

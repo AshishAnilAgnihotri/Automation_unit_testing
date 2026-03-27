@@ -1,0 +1,10 @@
+EXECUTIVE AUDIT RECORD
+==============================
+SOURCE: actualvalue_50.xlsx
+TARGET: shorthandvalues_50.xlsx
+
+ROWS: 50
+CRITICAL (RED): 1
+SHORTHAND (YELLOW): 15
+SCORE: 99.6%
+==============================
