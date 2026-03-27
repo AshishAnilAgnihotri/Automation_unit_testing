@@ -5,7 +5,7 @@ import io
 from datetime import datetime
 from pathlib import Path
 
-# --- PREMIUM UI/UX CONFIGURATION ---
+# --- UI CONFIGURATION ---
 st.set_page_config(page_title="Audit Command Center", layout="wide", page_icon="🛡️")
 
 st.markdown("""
@@ -47,7 +47,6 @@ def parse_fin(val):
         return 0.0
 
 def get_state(v1, v2):
-    """Returns Severity: 0 (Match), 1 (Yellow), 2 (Red)."""
     s1, s2 = clean_brackets(v1), clean_brackets(v2)
     if s1 == s2: return 0
     n1, n2 = parse_fin(v1), parse_fin(v2)
@@ -75,7 +74,7 @@ if file_a and file_b:
         final_a = df_a.reindex(range(max_r)).fillna("MISSING")
         final_b = df_b[common_headers].reindex(range(max_r)).fillna("MISSING")
 
-        # Global cleaning for UI display
+        # Visual Cleaning
         for col in common_headers:
             final_a[col] = final_a[col].apply(clean_brackets)
             final_b[col] = final_b[col].apply(clean_brackets)
@@ -86,7 +85,6 @@ if file_a and file_b:
         all_rows_for_export = []
         red_c, yellow_c = 0, 0
 
-        # Run Comparison for All Rows
         for r in range(max_r):
             row_has_variance = False
             amount_col = "AMOUNT" if "AMOUNT" in common_headers else None
@@ -101,57 +99,53 @@ if file_a and file_b:
                     if lvl == 2: red_c += 1
                     else: yellow_c += 1
 
-            # Prepare row for Export (Including Matches)
-            combined_row = {f"A_{c}": final_a.at[r, c] for c in common_headers}
-            combined_row.update({f"B_{c}": final_b.at[r, c] for c in common_headers})
+            # Build row dictionary with strict column ordering for Excel (L & M alignment)
+            row_data = {}
+            for c in common_headers: row_data[f"A_{c}"] = final_a.at[r, c]
+            for c in common_headers: row_data[f"B_{c}"] = final_b.at[r, c]
             
-            # Status Flag
-            combined_row["MATCH_STATUS"] = "MISMATCH" if row_has_variance else "MATCH"
+            row_data["MATCH_STATUS"] = "MISMATCH" if row_has_variance else "MATCH"
             
-            # Variance Calculations
+            # Variance Calculations (Always Positive Diff)
             if amount_col:
                 val_a = parse_fin(final_a.at[r, amount_col])
                 val_b = parse_fin(final_b.at[r, amount_col])
-                abs_diff = val_b - val_a
-                pct_diff = (abs_diff / val_a * 100) if val_a != 0 else 0
                 
-                combined_row["ABS_DIFF_VAL"] = round(abs_diff, 2)
-                combined_row["PERCENT_DIFF"] = f"{round(pct_diff, 2)}%"
-            
-            all_rows_for_export.append(combined_row)
+                # ABSOLUTE DIFFERENCE (MAX - MIN)
+                abs_diff = abs(val_b - val_a)
+                pct_diff = (abs_diff / val_a * 100) if val_a != 0 else (100.0 if abs_diff > 0 else 0)
+                
+                row_data["ABS_DIFF_VAL"] = round(abs_diff, 2)  # Column L
+                row_data["PERCENT_DIFF"] = f"{round(pct_diff, 2)}%" # Column M
+            else:
+                row_data["ABS_DIFF_VAL"] = 0
+                row_data["PERCENT_DIFF"] = "0%"
 
-        # --- EXPORT SECTION ---
+            all_rows_for_export.append(row_data)
+
+        # --- EXPORT ---
         export_df = pd.DataFrame(all_rows_for_export)
         buffer = io.BytesIO()
         with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
             export_df.to_excel(writer, index=False, sheet_name='Full_Reconciliation')
-            
-            # Basic Excel Formatting
             workbook = writer.book
             worksheet = writer.sheets['Full_Reconciliation']
-            header_format = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
+            # Header formatting
+            header_fmt = workbook.add_format({'bold': True, 'bg_color': '#1f6feb', 'font_color': 'white', 'border': 1})
             for col_num, value in enumerate(export_df.columns.values):
-                worksheet.write(0, col_num, value, header_format)
-            worksheet.freeze_panes(1, 0) # Freeze top row
+                worksheet.write(0, col_num, value, header_fmt)
+            worksheet.freeze_panes(1, 0)
             
-        st.download_button(
-            label="📥 Download Master Reconciliation Report (All Rows)",
-            data=buffer.getvalue(),
-            file_name=f"Full_Audit_Report_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
+        st.download_button("📥 Download Master Report", buffer.getvalue(), f"Full_Audit_{datetime.now().strftime('%H%M')}.xlsx")
 
-        # --- METRICS & TABLES ---
+        # --- UI DISPLAY ---
         total_cells = max_r * len(common_headers)
         integrity = round(((total_cells - red_c) / total_cells) * 100, 2)
         st.markdown(f'<div class="report-card"><h1>Integrity Score: {integrity}%</h1></div>', unsafe_allow_html=True)
         
         c1, c2, c3 = st.columns(3)
-        c1.metric("Total Rows Processed", max_r)
-        c2.metric("Critical Cells", red_c)
-        c3.metric("Warning Cells", yellow_c)
-
-        st.markdown("### 🔍 Live Workspace View")
+        c1.metric("Total Rows", max_r); c2.metric("Critical Cells", red_c); c3.metric("Warning Cells", yellow_c)
+        
         v1, v2 = st.columns(2)
         v1.dataframe(final_a.style.apply(lambda x: style_a, axis=None), use_container_width=True)
         v2.dataframe(final_b.style.apply(lambda x: style_b, axis=None), use_container_width=True)
