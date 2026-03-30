@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import re
 import io
-from datetime import datetime
 
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Audit Command Center", layout="wide", page_icon="🛡️")
@@ -29,6 +28,7 @@ def clean_brackets(val):
     return re.sub(r'[\(\[].*?[\)\]]', '', str(val)).strip()
 
 def parse_fin(val):
+    """Shorthand Financial Parser for Tab 1 (K, M, B support)."""
     s = clean_brackets(val).upper().replace('$', '').replace(',', '')
     if s == "" or s == "MISSING": return 0.0
     m = 1.0
@@ -39,6 +39,7 @@ def parse_fin(val):
     except ValueError: return 0.0
 
 def parse_val_2(val):
+    """Clean and convert to float for Tab 2, rounding to 2 decimals."""
     if pd.isna(val) or str(val).strip() == "" or str(val).upper() == "MISSING": return 0.0
     s = str(val).replace('$', '').replace(',', '').strip()
     try:
@@ -100,49 +101,31 @@ with tab1:
                         style_b.at[r, col] = f'background-color: {color}; color: {"#ff4b4b" if lvl == 2 else "#fbff00"};'
 
                 if row_diff: mismatch_count += 1
-                
-                # CRITICAL: Prepare Master Export Row with specific Variance Columns
                 row_data = {f"A_{c}": final_a.at[r, c] for c in common}
                 row_data.update({f"B_{c}": final_b.at[r, c] for c in common})
                 row_data["MATCH_STATUS"] = "MISMATCH" if row_diff else "MATCH"
                 
-                # Dynamic numeric column detection for variance calculation
                 num_col = next((c for c in common if any(k in c for k in ['AMOUNT', 'SPEND', 'COST', 'VALUE'])), common[-1])
-                val_a = parse_fin(final_a.at[r, num_col])
-                val_b = parse_fin(final_b.at[r, num_col])
-                
-                # Column: ABS_DIFF_AMOUNT (Always Positive)
-                abs_val = abs(val_a - val_b)
-                row_data["ABS_DIFF_AMOUNT"] = round(abs_val, 2)
-                
-                # Column: PERCENTAGE_DIFF
-                if val_a != 0:
-                    pct_val = (abs_val / val_a) * 100
-                else:
-                    pct_val = 100.0 if abs_val > 0 else 0.0
-                row_data["PERCENTAGE_DIFF"] = f"{round(pct_val, 2)}%"
-                
+                val_a, val_b = parse_fin(final_a.at[r, num_col]), parse_fin(final_b.at[r, num_col])
+                abs_diff = abs(val_a - val_b)
+                row_data["ABS_DIFF_AMOUNT"] = round(abs_diff, 2)
+                row_data["PERCENTAGE_DIFF"] = f"{round((abs_diff / val_a * 100), 2) if val_a != 0 else 0}%"
                 all_rows.append(row_data)
 
-            # Master Export Generation
-            export_df = pd.DataFrame(all_rows)
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='xlsxwriter') as wr:
-                export_df.to_excel(wr, index=False, sheet_name='Financial_Audit')
-            
-            # --- SUMMARY ANALYSIS DASHBOARD ---
             st.markdown('<div class="report-card"><h3>Financial Integrity Summary</h3></div>', unsafe_allow_html=True)
             s1, s2, s3 = st.columns(3)
             s1.metric("Total Rows", max_r)
-            s2.metric("Mismatches Found", mismatch_count, delta_color="inverse")
-            s3.download_button("📥 Download Master Report", buf.getvalue(), "Financial_Audit_Report.xlsx")
+            s2.metric("Mismatches", mismatch_count, delta_color="inverse")
+            buf = io.BytesIO()
+            with pd.ExcelWriter(buf, engine='xlsxwriter') as wr: pd.DataFrame(all_rows).to_excel(wr, index=False)
+            s3.download_button("📥 Download Master Report", buf.getvalue(), "Financial_Audit.xlsx")
 
             v1, v2 = st.columns(2)
             v1.dataframe(final_a.style.apply(lambda x: style_a, axis=None), use_container_width=True)
             v2.dataframe(final_b.style.apply(lambda x: style_b, axis=None), use_container_width=True)
 
 # ---------------------------------------------------------
-# TAB 2: GENERAL DATA COMPARISON
+# TAB 2: GENERAL DATA COMPARISON (Aggregated, Filtered & Product Select)
 # ---------------------------------------------------------
 with tab2:
     st.subheader("General Data Comparison Mode")
@@ -151,58 +134,57 @@ with tab2:
     other_b = c2.file_uploader("📂 Target (File 2)", type=['xlsx', 'csv'], key="t2_fb")
     
     if other_a and other_b:
-        df_o1 = pd.read_excel(other_a, dtype=str).fillna("") if other_a.name.endswith('xlsx') else pd.read_csv(other_a, dtype=str).fillna("")
-        df_o2 = pd.read_excel(other_b, dtype=str).fillna("") if other_b.name.endswith('xlsx') else pd.read_csv(other_b, dtype=str).fillna("")
+        df_o1_raw = pd.read_excel(other_a).fillna(0) if other_a.name.endswith('xlsx') else pd.read_csv(other_a).fillna(0)
+        df_o2_raw = pd.read_excel(other_b).fillna(0) if other_b.name.endswith('xlsx') else pd.read_csv(other_b).fillna(0)
 
-        # Filter for Row 3+ units
-        df_o2_units = df_o2[df_o2.iloc[:, 2].str.strip() != ""].copy()
-        df_o1['UID'] = df_o1.iloc[:, 6].str.strip().str.upper() + "_" + df_o1.iloc[:, 9].str.strip().str.upper()
-        df_o2_units['UID'] = df_o2_units.iloc[:, 0].str.strip().str.upper() + "_" + df_o2_units.iloc[:, 2].str.strip().str.upper()
+        # 1. CLUBBING SOURCE (Sheet 1)
+        df_o1_raw['PRODUCT_NAME'] = df_o1_raw.iloc[:, 6].astype(str).str.strip().str.upper()
+        df_o1_raw['UID'] = df_o1_raw['PRODUCT_NAME'] + "_" + df_o1_raw.iloc[:, 9].astype(str).str.strip().str.upper()
+        
+        f1_num_indices = [11, 12, 13, 14, 15]
+        f1_num_cols = [df_o1_raw.columns[i] for i in f1_num_indices]
+        for col in f1_num_cols: df_o1_raw[col] = df_o1_raw[col].apply(parse_val_2)
+        df_o1_clubbed = df_o1_raw.groupby(['PRODUCT_NAME', 'UID'])[f1_num_cols].sum().reset_index()
 
-        if st.button("RUN GENERAL COMPARISON"):
-            merged = pd.merge(df_o1, df_o2_units, on='UID', how='outer', suffixes=('_F1', '_F2')).fillna("MISSING")
+        # 2. FILTERING TARGET (Sheet 2) - Skips rows where Col C is empty
+        df_o2_filtered = df_o2_raw[df_o2_raw.iloc[:, 2].astype(str).str.strip().replace("0", "") != ""].copy()
+        df_o2_filtered['UID'] = df_o2_filtered.iloc[:, 0].astype(str).str.strip().str.upper() + "_" + df_o2_filtered.iloc[:, 2].astype(str).str.strip().str.upper()
+
+        # Dynamic Product Filter
+        unique_prods = sorted(df_o1_clubbed['PRODUCT_NAME'].unique())
+        selected_prod = st.selectbox("🎯 Filter Results by Product:", ["ALL"] + unique_prods)
+
+        if st.button("RUN AGGREGATED COMPARISON"):
+            merged = pd.merge(df_o1_clubbed, df_o2_filtered, on='UID', how='outer', suffixes=('_F1', '_F2')).fillna(0)
+            if selected_prod != "ALL": merged = merged[merged['PRODUCT_NAME'] == selected_prod]
+
             audit_rows_2 = []
-            red_rows_count = 0
-            total_var = 0.0
-
+            mismatch_count_2 = 0
             for _, row in merged.iterrows():
                 res = {"UNIQUE_ID": row['UID'], "OVERALL_MATCH": True}
-                
-                def check_with_tol(v1, v2):
+                def check_tol(v1, v2):
                     n1, n2 = parse_val_2(v1), parse_val_2(v2)
-                    diff = abs(n1 - n2)
-                    mx = max(abs(n1), abs(n2))
+                    diff, mx = abs(n1 - n2), max(abs(n1), abs(n2))
                     threshold = 0.005 * mx if mx != 0 else 0
-                    if diff <= max(threshold, 0.01):
-                        return f"✅ {n1:.2f}", diff
-                    return f"❌ {n1:.2f} | {n2:.2f}", diff
+                    if diff <= max(threshold, 0.01): return f"✅ {n1:,.2f}"
+                    return f"❌ {n1:,.2f} | {n2:,.2f}"
 
-                r1, d1 = check_with_tol(row.get('Old spend', 'N/A'), row.get('Historical Product Spend', 'N/A'))
-                r2, d2 = check_with_tol(row.get('Impactable sales', 'N/A'), row.get('Historical Impactable Sales', 'N/A'))
-                r3, d3 = check_with_tol(row.get('Optimized spend', 'N/A'), row.get('Optimized Product Spend', 'N/A'))
-                r4, d4 = check_with_tol(row.get('Optimize impactable sales', 'N/A'), row.get('Optimized Impactable Sales', 'N/A'))
-                r5, d5 = check_with_tol(row.get('Optimized ROI_F1', 'N/A'), row.get('Optimized ROI_F2', 'N/A'))
+                res["L_vs_E (Old Spend)"] = check_tol(row.iloc[2], row.get('Historical Product Spend', 0))
+                res["N_vs_G (Imp Sales)"] = check_tol(row.iloc[4], row.get('Historical Impactable Sales', 0))
+                res["M_vs_D (Opt Spend)"] = check_tol(row.iloc[3], row.get('Optimized Product Spend', 0))
+                res["O_vs_F (Opt Imp Sales)"] = check_tol(row.iloc[5], row.get('Optimized Impactable Sales', 0))
+                res["P_vs_H (ROI)"] = check_tol(row.iloc[6], row.get('Optimized ROI', 0))
 
-                res.update({"L_vs_E": r1, "N_vs_G": r2, "M_vs_D": r3, "O_vs_F": r4, "P_vs_H": r5})
-                if any("❌" in str(v) for v in res.values()):
+                if "❌" in str(res.values()):
                     res["OVERALL_MATCH"] = False
-                    red_rows_count += 1
-                
-                total_var += (d1 + d2 + d3 + d4)
+                    mismatch_count_2 += 1
                 audit_rows_2.append(res)
 
-            # SUMMARY ANALYSIS TAB 2
-            st.markdown('<div class="report-card"><h3>Mapped Comparison Summary</h3></div>', unsafe_allow_html=True)
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Mapped Records", len(merged))
-            m2.metric("Mismatched (Red)", red_rows_count, delta_color="inverse")
-            m3.metric("Aggregated Variance", f"${total_var:,.2f}")
-
             report_df = pd.DataFrame(audit_rows_2)
-            def style_general(row):
-                if not row['OVERALL_MATCH']:
-                    return ['background-color: #4b1111; color: #ffcccc'] * len(row)
-                return [''] * len(row)
+            st.markdown('<div class="report-card"><h3>Comparison Analysis Summary</h3></div>', unsafe_allow_html=True)
+            m1, m2 = st.columns(2)
+            m1.metric(f"Records ({selected_prod})", len(report_df))
+            m2.metric("Mismatches", mismatch_count_2, delta_color="inverse")
 
-            st.dataframe(report_df.style.apply(style_general, axis=1), use_container_width=True)
-            st.download_button("📥 Download General Audit Report", report_df.to_csv(index=False), "General_Audit_Report.csv")
+            st.dataframe(report_df.style.apply(lambda r: ['background-color: #4b1111' if not r.OVERALL_MATCH else '' for _ in r], axis=1), use_container_width=True)
+            st.download_button("📥 Download Filtered Report", report_df.to_csv(index=False), "Filtered_Audit.csv")
