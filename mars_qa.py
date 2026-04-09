@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import re
 import io
+import math
 
 # --- UI CONFIGURATION ---
 st.set_page_config(page_title="Data Comparison Tool", layout="wide", page_icon="🛡️")
@@ -43,11 +44,9 @@ def extract_roi_lead(val):
     """Extracts the integer part before any : or . (e.g., 4.3 -> 4, 5:11 -> 5)."""
     if pd.isna(val) or str(val).strip() == "": return 0
     s = str(val).strip()
-    # Find first sequence of numbers before a : or .
     match = re.search(r'^(\d+)', s)
     if match:
         return int(match.group(1))
-    # Fallback: remove symbols and try splitting
     s_clean = re.sub(r'[^\d:.]', '', s)
     parts = re.split(r'[:.]', s_clean)
     try:
@@ -187,18 +186,24 @@ with tab2:
         df_o1_clubbed = df_o1_raw.groupby(['PRODUCT_NAME', 'UID'])[f1_col_agg].sum().reset_index()
 
         # 2. PROCESS FILE 2
-        orig_roi_col_name = df_o2_raw.columns[7] if len(df_o2_raw.columns) > 7 else "ROI"
         df_o2_raw.iloc[:, 0] = df_o2_raw.iloc[:, 0].astype(str).str.strip().str.upper()
         df_o2_raw.iloc[:, 2] = df_o2_raw.iloc[:, 2].astype(str).str.strip().str.upper()
-        df_o2_filtered = df_o2_raw[(df_o2_raw.iloc[:, 0] != "") & (df_o2_raw.iloc[:, 0] != "NAN") & (df_o2_raw.iloc[:, 2] != "") & (df_o2_raw.iloc[:, 2] != "NAN")].copy()
+        
+        # --- REFINED FILTERING LOGIC ---
+        # 1. Exclude Empty/Null Cost Types
+        # 2. Exclude rows containing the word "TOTAL" in the Cost Type (Column index 2)
+        # 3. Exclude NAN product identifiers
+        df_o2_filtered = df_o2_raw[
+            (df_o2_raw.iloc[:, 0] != "") & (df_o2_raw.iloc[:, 0] != "NAN") & 
+            (df_o2_raw.iloc[:, 2] != "") & (df_o2_raw.iloc[:, 2] != "NAN") &
+            (~df_o2_raw.iloc[:, 2].str.contains("TOTAL", na=False))
+        ].copy()
+        
         df_o2_filtered['UID'] = df_o2_filtered.iloc[:, 0] + "_" + df_o2_filtered.iloc[:, 2]
+        orig_roi_col_name = df_o2_raw.columns[7] if len(df_o2_raw.columns) > 7 else "ROI"
 
         if st.button("RUN FULL AGGREGATED COMPARISON"):
-            # OUTER MERGE
             merged = pd.merge(df_o1_clubbed, df_o2_filtered, on='UID', how='outer', suffixes=('_F1', '_F2')).fillna(0)
-            
-            # Resolve the ROI column name in the merged dataframe
-            # It might be named with a suffix or just the original name
             actual_roi_col = next((c for c in merged.columns if c == orig_roi_col_name or c == f"{orig_roi_col_name}_F2"), None)
             
             audit_rows_2, mismatch_count_2 = [], 0
@@ -214,15 +219,16 @@ with tab2:
                     n1, n2 = parse_val_2(v1), parse_val_2(v2)
                     diff = abs(n1 - n2)
                     mx = max(abs(n1), abs(n2))
-                    tol = max(0.005 * mx, 0.01) if mx != 0 else 0.01
-                    return (f"{n1:,.2f} | {n2:,.2f}", diff <= tol, n2)
+                    tol = max(0.05 * mx, 0.01) if mx != 0 else 0.01
+                    return (f"{n1:,.2f} | {n2:,.2f}", diff <= tol, n1, n2)
 
-                s1, m1, _ = compare_vals(row.iloc[2], row.get('Historical Product Spend', 0))
-                s2, m2, v2_o_spend = compare_vals(row.iloc[3], row.get('Optimized Product Spend', 0))
-                s3, m3, _ = compare_vals(row.iloc[4], row.get('Historical Impactable Sales', 0))
-                s4, m4, v2_o_sales = compare_vals(row.iloc[5], row.get('Optimized Impactable Sales', 0))
+                s1, m1, _, _ = compare_vals(row.iloc[2], row.get('Historical Product Spend', 0))
+                s2, m2, v1_spend_opt, v2_o_spend = compare_vals(row.iloc[3], row.get('Optimized Product Spend', 0))
+                s3, m3, _, _ = compare_vals(row.iloc[4], row.get('Historical Impactable Sales', 0))
+                s4, m4, v1_sales_opt, v2_o_sales = compare_vals(row.iloc[5], row.get('Optimized Impactable Sales', 0))
                 
-                # Extract MARS ROI from the identified Column H location
+                spend_diff_raw = (v2_o_spend - v1_spend_opt)
+                streamlit_roi = int(round(v1_sales_opt / v1_spend_opt)) if v1_spend_opt != 0 else 0
                 raw_roi = row.get(actual_roi_col, "0") if actual_roi_col else "0"
                 mars_roi_extracted = extract_roi_lead(raw_roi)
 
@@ -231,10 +237,13 @@ with tab2:
                     "Opt Spend (F1|F2)": s2,
                     "Hist Sales (F1|F2)": s3, 
                     "Opt Sales (F1|F2)": s4,
+                    "file 1": v1_spend_opt,
+                    "file 2": v2_o_spend,
                     "Optimized product Spend": v2_o_spend,
                     "Optimized Impactable Sales": v2_o_sales,
-                    "MARS ROI": mars_roi_extracted, 
-                    "Target ROI": extract_roi_lead(row.iloc[12]) if len(row) > 12 else 0
+                    "Percentage Product spend Difference": round(spend_diff_raw, 2),
+                    "streamlit ROI": streamlit_roi,
+                    "MARS ROI": mars_roi_extracted
                 })
 
                 if not all([m1, m2, m3, m4]):
